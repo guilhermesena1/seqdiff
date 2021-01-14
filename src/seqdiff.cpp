@@ -22,8 +22,22 @@ using std::end;
 using std::unordered_map;
 using std::unordered_set;
 
-static bool file_exists(const string &file) {
+static bool
+file_exists(const string &file) {
   return access(file.c_str(), R_OK) == 0;
+}
+
+static void
+get_chrom(const string &chrom_name, const vector<string> &all_chroms,
+          const unordered_map<string, size_t> &chrom_lookup,
+          string &chrom) {
+  const auto the_chrom = chrom_lookup.find(chrom_name);
+  if (the_chrom == end(chrom_lookup))
+    throw runtime_error("could not find chrom " + chrom_name);
+
+  chrom = all_chroms[the_chrom->second];
+  if (chrom.empty())
+    throw runtime_error("problem with chrom sequence " + chrom_name);
 }
 
 int
@@ -67,8 +81,6 @@ main(const int argc, const char **argv) {
       throw runtime_error("cannot open mapped reads file: " +
           mapped_reads_file);
 
-    SAMReader sam_reader(mapped_reads_file);
-    sam_rec aln;
 
     // read chroms into strings
     vector<string> all_chroms;
@@ -93,6 +105,24 @@ main(const int argc, const char **argv) {
     if (VERBOSE)
       cerr << "[read " << all_chroms.size() << " chromosomes]\n";
 
+    SAMReader sam_reader(mapped_reads_file);
+    sam_rec aln;
+    unordered_set<string> chroms_seen;
+    string cur_chrom, cur_chrom_name;
+    while (sam_reader >> aln) {
+      if (cur_chrom.empty() || aln.rname != cur_chrom_name) {
+        if (chroms_seen.find(aln.rname) != end(chroms_seen))
+          throw runtime_error("chroms out of order in mapped reads file\n");
+
+        if (VERBOSE)
+          cerr << "[processing chromosome " << aln.rname << "]\n";
+
+        cur_chrom_name = aln.rname;
+        chroms_seen.insert(cur_chrom_name);
+        get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom);
+      }
+    }
+
   }
   catch (const runtime_error &e) {
     cerr << e.what() << endl;
@@ -103,5 +133,5 @@ main(const int argc, const char **argv) {
     return EXIT_FAILURE;
   }
 
-    return 0;
+  return EXIT_SUCCESS;
 }
