@@ -24,72 +24,150 @@ using std::end;
 using std::unordered_map;
 using std::unordered_set;
 using std::to_string;
+using std::min;
+using std::max;
+using std::ostream;
+using std::ostringstream;
+
+typedef uint16_t count_t;
 
 static bool
 file_exists(const string &file) {
   return access(file.c_str(), R_OK) == 0;
 }
 
+//sizeof(pos_stats) = 64
 struct pos_stats {
-  uint16_t cnt_A;
-  uint16_t cnt_C;
-  uint16_t cnt_G;
-  uint16_t cnt_T;
-  uint16_t cnt_DEL;
+  count_t bases_ref;
+  count_t bases_nref;
+  count_t bases_pos;
+  count_t bases_neg;
 
-  uint16_t pos_bases;
-  uint16_t neg_bases;
-  static const char DEL_BASE = '#';
   void reset() { 
-    cnt_A = cnt_C = cnt_G = cnt_T = cnt_DEL = pos_bases = neg_bases = 0;
+    bases_ref = bases_nref = bases_pos = bases_neg = 0;
   }
 
-  pos_stats() {
+  pos_stats() { reset(); }
+
+  double get_geno_likelihood(const size_t geno_count) const;
+  void add_base(const bool is_ref, const bool is_pos);
+  string tostring() const;
+
+  bool sure_homozygous() const {
+    return ((depth() >= 5) && (10*max(bases_ref, bases_nref) >= 9*depth()));
+  }
+
+  bool sure_ref() const {
+    return ((depth() >= 5) && (10*bases_ref >= 9*depth()));
+  }
+
+  inline count_t depth() const {
+    return bases_ref + bases_nref;
+  }
+
+  static char DEL_BASE;
+  static uint16_t num_bases;
+};
+
+uint16_t pos_stats::num_bases = 5;
+char pos_stats::DEL_BASE = '#';
+
+double
+pos_stats::get_geno_likelihood(const size_t geno_count) const {
+  return 1.0;
+}
+
+void
+pos_stats::add_base(const bool is_ref, const bool is_pos) {
+  //assert(bases_ref + bases_nref == bases_pos + bases_neg);
+  bases_ref += is_ref; bases_nref += !is_ref;
+  bases_pos += is_pos; bases_neg += !is_pos;
+}
+
+string
+pos_stats::tostring() const {
+  ostringstream oss;
+  oss << bases_ref << '\t' << bases_nref << '\t'
+      << bases_pos << '\t' << bases_neg;
+
+  oss << '\t' << (sure_homozygous() ? 'Y' : 'N');
+  oss << '\t' << (sure_ref() ? 'Y' : 'N');
+  return oss.str();
+}
+
+ostream &
+operator<<(ostream &the_stream, const pos_stats &stats) {
+  the_stream << stats.tostring();
+  return the_stream;
+}
+
+struct total_counts {
+  size_t total_a;
+  size_t total_c;
+  size_t total_g;
+  size_t total_t;
+  size_t total_del;
+
+  // expected from the genome
+  size_t exp_a;
+  size_t exp_c;
+  size_t exp_g;
+  size_t exp_t;
+  void reset() {
+    total_a = total_c = total_g = total_t = total_del = 0;
+    exp_a = exp_c = exp_g = exp_t = 0;
+  }
+  total_counts() {
     reset();
   }
 
-  void add_base(const char c, const bool is_neg) {
-    if (c == 'A') ++cnt_A;
-    else if (c == 'C') ++cnt_C;
-    else if (c == 'G') ++cnt_G;
-    else if (c == 'T') ++cnt_T;
-    else if (c == DEL_BASE) ++cnt_DEL;
-    else return;
-    pos_bases += !is_neg;
+  void add_exp(const char c) {
+    exp_a += (c == 'A');
+    exp_c += (c == 'C');
+    exp_g += (c == 'G');
+    exp_t += (c == 'T');
+  }
+
+  void add_base(const char c) {
+    total_a += (c == 'A');
+    total_c += (c == 'C');
+    total_g += (c == 'G');
+    total_t += (c == 'T');
+    total_del += (c == pos_stats::DEL_BASE);
   }
 
   string tostring() const {
-    const size_t _depth = depth();
-    const double denom = static_cast<double>(_depth);
-    return to_string(_depth) + '\t' +
-           to_string(pos_bases) + '\t' +
-           to_string(_depth - pos_bases) + '\t' +
-           to_string(cnt_A/denom) + '\t' +
-           to_string(cnt_C/denom) + '\t' +
-           to_string(cnt_G/denom) + '\t' +
-           to_string(cnt_T/denom) + '\t' +
-           to_string(cnt_DEL/denom);
-  }
-
-  uint16_t depth() const {
-    return cnt_A + cnt_C + cnt_G + cnt_T + cnt_DEL;
+    ostringstream oss;
+    oss << "A: " << total_a / static_cast<double>(exp_a) << '\t';
+    oss << "C: " << total_c / static_cast<double>(exp_c) << '\t';
+    oss << "G: " << total_g / static_cast<double>(exp_g)  << '\t';
+    oss << "T: " << total_t / static_cast<double>(exp_t)  << '\t';
+    oss << pos_stats::DEL_BASE << ": " << total_del;
+    return oss.str();
   }
 };
+
 
 static void
 get_chrom(const string &chrom_name, const vector<string> &all_chroms,
           const unordered_map<string, size_t> &chrom_lookup,
-          string &chrom, vector<pos_stats> &stats) {
+          string &chrom, vector<pos_stats> &stats,
+          total_counts &cnts) {
   const auto the_chrom = chrom_lookup.find(chrom_name);
   if (the_chrom == end(chrom_lookup))
     throw runtime_error("could not find chrom " + chrom_name);
 
   chrom = all_chroms[the_chrom->second];
+  transform(begin(chrom), end(chrom), begin(chrom), ::toupper);
 
   const size_t chrom_sz = chrom.size();
   stats.resize(chrom_sz);
-  for (size_t i = 0; i < chrom_sz; ++i)
+
+  cnts.reset();
+  for (size_t i = 0; i < chrom_sz; ++i) {
+    cnts.add_exp(chrom[i]);
     stats[i].reset();
+  }
 
   if (chrom.empty())
     throw runtime_error("problem with chrom sequence " + chrom_name);
@@ -136,50 +214,78 @@ swap_bisulfite_base(sam_rec &aln) {
 
 template<const bool bisulfite_bases>
 void
-adjust_alignment(sam_rec &aln, bool &is_neg) {
-  // (1) make pos zero-based
-  --aln.pos;
-
-  // (2) revcomp to match the available sequence
+adjust_alignment(sam_rec &aln) {
+  --aln.pos; // 0-based pos
   if (check_flag(aln, samflags::read_rc)) {
-    is_neg = true;
-    unset_flag(aln, samflags::read_rc);
     revcomp_inplace(aln.seq);
-    if (bisulfite_bases)
-      swap_bisulfite_base(aln);
+    if (bisulfite_bases) swap_bisulfite_base(aln);
   }
 
-  // (3) apply CIGAR with deletion symbol
   inflate_with_cigar(aln, aln.seq, pos_stats::DEL_BASE);
+  // GS: (not sure if needed) uppercase seq
 }
 
 inline char
 get_bisulfite_base(const sam_rec &aln) {
   static const size_t the_cv_tag_pos = 1;
-  return aln.tags[the_cv_tag_pos].back();
+  const char c = aln.tags[the_cv_tag_pos].back();
+  if (c != 'A' && c != 'T')
+    throw runtime_error("bad bisulfite base: " + aln.tostring());
+  return c;
 }
 
-template<const bool bisulfite_bases>
+inline bool
+is_bisulfite_base(const char c, const char b) {
+  return (b == 'T') ?
+         (c == 'T' || c == 'C') :
+         (c == 'A' || c == 'G'); 
+}
+
+template<const bool do_bisulfite_bases>
 void
-process_alignment(const bool is_neg, const sam_rec &aln,
-                  vector<pos_stats> &stats) {
+process_alignment(const sam_rec &aln,
+                  const string &chrom, vector<pos_stats> &stats,
+                  total_counts &cnts) {
+  char bisulfite_base = 0;
+  if (do_bisulfite_bases)
+    bisulfite_base = get_bisulfite_base(aln);
   const size_t lim = aln.seq.size();
   const size_t start = aln.pos;
-  const char bisulfite_base = get_bisulfite_base(aln);
   for (size_t i = 0; i < lim; ++i) {
-    if (!bisulfite_bases || aln.seq[i] != bisulfite_base) {
-      stats[start + i].add_base(aln.seq[i], is_neg);
+    const char the_aln_base = aln.seq[i];
+    if (!do_bisulfite_bases || !is_bisulfite_base(the_aln_base, bisulfite_base)) {
+      stats[start + i].add_base(
+        the_aln_base == chrom[start + i], // ref base
+        !check_flag(aln, samflags::read_rc) // +/- strand
+      );
+      cnts.add_base(the_aln_base);
     }
   }
 }
 
+static double
+calc_error_freq(const vector<pos_stats> &stats) {
+  size_t err = 0;
+  size_t tot = 0;
+  const size_t lim = stats.size();
+  for (size_t i = 0; i < lim; ++i) {
+    if (stats[i].sure_homozygous()) {
+      err += min(stats[i].bases_ref, stats[i].bases_nref);
+      tot += stats[i].depth();
+    }
+  }
+ 
+  return err / static_cast<double>(tot);
+}
+
 static void
 summarize_chrom_stats(const string & cur_chrom, const vector<pos_stats> &stats) {
+  const double error_freq = calc_error_freq(stats);
   const size_t lim = cur_chrom.size();
-  cout << "pos\tbase\tdepth\t+\t-\tA\tC\tG\tT\tDEL\n";
+  cout << "pos\tbase\tref\tnref\tpos\tneg\thomozygous\teq_to_ref\n";
   for (size_t i = 0; i < lim; ++i) {
     if (stats[i].depth() > 0)
-      cout << i << '\t' << cur_chrom[i] << '\t' << stats[i].tostring() << '\n';
+      cout << i << '\t' << cur_chrom[i] << '\t' << stats[i] << '\n';
   }
 }
 
@@ -196,16 +302,20 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
   string cur_chrom, cur_chrom_name = "";
 
   vector<pos_stats> stats;
-  size_t num_reads_for_chrom = 0;
+  bool chrom_has_reads = false;
+
+  total_counts cnts;
   while (sam_reader >> aln) {
     if (aln.rname != cur_chrom_name) {
       // new chrom to process
       if (chroms_seen.find(aln.rname) != end(chroms_seen))
         throw runtime_error("chroms out of order in mapped reads file\n");
 
-      if (num_reads_for_chrom > 0) {
-        if (VERBOSE)
+      if (chrom_has_reads) {
+        if (VERBOSE) {
           cerr << "[writing stats for " << cur_chrom_name << "]\n";
+          cerr << cnts.tostring() << "\n";
+        }
 
         cout << ">" << cur_chrom_name <<"\n";
         summarize_chrom_stats(cur_chrom, stats);
@@ -215,20 +325,23 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
 
       cur_chrom_name = aln.rname;
       chroms_seen.insert(cur_chrom_name);
-      get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom, stats);
+      get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom, stats, cnts);
     }
-    ++num_reads_for_chrom;
-    bool is_neg = false;
-    adjust_alignment<bisulfite_bases>(aln, is_neg);
-    process_alignment<bisulfite_bases>(is_neg, aln, stats);
+
+    chrom_has_reads = true;
+    adjust_alignment<bisulfite_bases>(aln);
+    process_alignment<bisulfite_bases>(aln, cur_chrom, stats, cnts);
   }
 
-  if (num_reads_for_chrom > 0) {
-    if (VERBOSE)
+  if (chrom_has_reads) {
+    if (VERBOSE) {
       cerr << "[writing stats for " << cur_chrom_name << "]\n";
+      cerr << cnts.tostring() << "\n";
+    }
 
     cout << ">" << cur_chrom_name <<"\n";
     summarize_chrom_stats(cur_chrom, stats);
+    cerr << cnts.tostring() << "\n";
   }
 }
 
