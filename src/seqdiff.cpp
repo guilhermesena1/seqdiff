@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <unistd.h>
+#include <cmath>
 
 #include "smithlab_utils.hpp"
 #include "smithlab_os.hpp"
@@ -43,7 +44,7 @@ struct pos_stats {
   count_t bases_pos;
   count_t bases_neg;
 
-  void reset() { 
+  void reset() {
     bases_ref = bases_nref = bases_pos = bases_neg = 0;
   }
 
@@ -65,11 +66,15 @@ struct pos_stats {
     return bases_ref + bases_nref;
   }
 
+  double calc_psi(const double err) const;
+  double loglik(const uint16_t g, const double err) const;
   static char DEL_BASE;
   static uint16_t num_bases;
+  static uint16_t num_alleles;
 };
 
 uint16_t pos_stats::num_bases = 5;
+uint16_t pos_stats::num_alleles = 2;
 char pos_stats::DEL_BASE = '#';
 
 double
@@ -82,6 +87,41 @@ pos_stats::add_base(const bool is_ref, const bool is_pos) {
   //assert(bases_ref + bases_nref == bases_pos + bases_neg);
   bases_ref += is_ref; bases_nref += !is_ref;
   bases_pos += is_pos; bases_neg += !is_pos;
+}
+
+double
+pos_stats::loglik(const uint16_t g, const double err) const {
+  //assert(g >= 0 && g <= num_alleles)
+  static const double m = static_cast<double>(num_alleles);
+  const double gg = static_cast<double>(g);
+  return (static_cast<double>(bases_ref)*
+           log((m - gg)*err + gg*(1 - err)) +
+         static_cast<double>(bases_nref)*
+           log((m - gg)*(1 - err) + gg*err) -
+         static_cast<double>(depth())*log(2.0));
+}
+
+double
+pos_stats::calc_psi(const double err) const {
+  // optimization: no nref bases -> psi = 1
+  if (bases_nref == 0) return 1.0;
+  double psi = 0.5;
+  double psi_prev = 0.0;
+  double l0 = exp(loglik(0, err));
+  double l1 = exp(loglik(1, err));
+  double l2 = exp(loglik(2, err));
+
+  // EM iteration
+  const double eps = 1e-10;
+  while (fabs(psi - psi_prev) > eps) {
+    psi_prev = psi;
+
+    const double num = 2*l1*psi*(1 - psi) + 2*l2*psi*psi;
+    const double denom = l0*(1 - psi)*(1 - psi) + 2*l1*psi*(1 - psi) + l2*psi*psi;
+
+    psi = num/(num_alleles*denom);
+  }
+  return psi;
 }
 
 string
@@ -238,7 +278,7 @@ inline bool
 is_bisulfite_base(const char c, const char b) {
   return (b == 'T') ?
          (c == 'T' || c == 'C') :
-         (c == 'A' || c == 'G'); 
+         (c == 'A' || c == 'G');
 }
 
 template<const bool do_bisulfite_bases>
@@ -274,18 +314,25 @@ calc_error_freq(const vector<pos_stats> &stats) {
       tot += stats[i].depth();
     }
   }
- 
+
   return err / static_cast<double>(tot);
 }
 
 static void
-summarize_chrom_stats(const string & cur_chrom, const vector<pos_stats> &stats) {
+summarize_chrom_stats(const bool VERBOSE,
+                      const string & cur_chrom, const vector<pos_stats> &stats) {
   const double error_freq = calc_error_freq(stats);
   const size_t lim = cur_chrom.size();
-  cout << "pos\tbase\tref\tnref\tpos\tneg\thomozygous\teq_to_ref\n";
+  if (VERBOSE) {
+    cerr << "[estimated error freq: " << error_freq << "]\n";
+    cerr << "[calculating psi and writing per-base stats]\n";
+  }
+  cout << "pos\tbase\tref\tnref\tpos\tneg\thomozygous\teq_to_ref\tpsi\n";
   for (size_t i = 0; i < lim; ++i) {
-    if (stats[i].depth() > 0)
-      cout << i << '\t' << cur_chrom[i] << '\t' << stats[i] << '\n';
+    if (stats[i].depth() > 5) {
+      cout << i << '\t' << cur_chrom[i] << '\t' << stats[i] << '\t'
+           << stats[i].calc_psi(error_freq) << '\n';
+    }
   }
 }
 
@@ -318,10 +365,10 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
         }
 
         cout << ">" << cur_chrom_name <<"\n";
-        summarize_chrom_stats(cur_chrom, stats);
+        summarize_chrom_stats(VERBOSE, cur_chrom, stats);
       }
       if (VERBOSE)
-        cerr << "[processing chromosome " << aln.rname << "]\n";
+        cerr << "[processing SAM reads in chromosome " << aln.rname << "]\n";
 
       cur_chrom_name = aln.rname;
       chroms_seen.insert(cur_chrom_name);
@@ -340,7 +387,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
     }
 
     cout << ">" << cur_chrom_name <<"\n";
-    summarize_chrom_stats(cur_chrom, stats);
+    summarize_chrom_stats(VERBOSE, cur_chrom, stats);
     cerr << cnts.tostring() << "\n";
   }
 }
