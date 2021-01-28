@@ -115,18 +115,33 @@ double
 pos_stats::calc_psi(const double err) const {
   // optimization: no nref bases -> psi = 1
   if (bases_nref == 0) return 1.0;
-  double psi = 0.5;
-  double psi_prev = 0.0;
+  if (bases_ref == 0) return 0.0;
   double l0 = exp(loglik(0, err));
   double l1 = exp(loglik(1, err));
   double l2 = exp(loglik(2, err));
 
-  if (isnan(l0) || isnan(l1) || isnan(l2))
-    throw runtime_error("bad loglik: " + to_string(l0) + " " + to_string(l1) +
-                        " " + to_string(l2));
-  // assert(eps < fabs(psi - psi_prev))
+  if (isnan(l0) || isnan(l1) || isnan(l2)) {
+    throw runtime_error("bad loglik: " +
+                        to_string(bases_ref) + " " +
+                        to_string(bases_nref) + " " +
+                        to_string(l0) + " " +
+                        to_string(l1) + " " +
+                        to_string(l2));
+  }
+
+  const double cand = (l0 - l1)/(l0 - 2*l1 + l2);
+  if (!isnan(cand)) {
+    if (cand >= 0 && cand <= 1) {
+      return cand;
+    }
+  }
+
   const double eps = 1e-10;
   size_t niter = 0;
+
+  double psi = 1;
+  double psi_prev = 0;
+
   while (fabs(psi - psi_prev) > eps) {
     psi_prev = psi;
 
@@ -149,6 +164,7 @@ pos_stats::calc_psi(const double err) const {
   // GS: not sure if needed, but it makes sense to truncate to zero when
   // psi is very small because it went under epsilon
   if (psi < eps) psi = 0;
+
   return psi;
 }
 
@@ -339,9 +355,15 @@ process_alignment(const sam_rec &aln,
     bisulfite_base = get_bisulfite_base(aln);
   const size_t lim = aln.seq.size();
   const size_t start = aln.pos;
+  const size_t chrom_sz = stats.size();
+
   for (size_t i = 0; i < lim; ++i) {
     const char the_aln_base = aln.seq[i];
     if (!do_bisulfite_bases || !is_bisulfite_base(the_aln_base, bisulfite_base)) {
+      if (start + i >= chrom_sz)
+        throw runtime_error("alignment mapped outside chrom boundaries\n" +
+                            aln.tostring());
+
       stats[start + i].add_base(
         the_aln_base, chrom[start + i], // ref base
         !check_flag(aln, samflags::read_rc) // +/- strand
@@ -353,6 +375,7 @@ process_alignment(const sam_rec &aln,
 
 static double
 calc_error_freq(const vector<pos_stats> &stats) {
+  static const double baseline_error_value = 0.01;
   size_t err = 0;
   size_t tot = 0;
   const size_t lim = stats.size();
@@ -362,7 +385,8 @@ calc_error_freq(const vector<pos_stats> &stats) {
       tot += stats[i].depth();
     }
   }
-
+  if (tot == 0)
+    return baseline_error_value;
   return err / static_cast<double>(tot);
 }
 
@@ -377,12 +401,15 @@ summarize_chrom_stats(const bool VERBOSE,
   const size_t lim = cur_chrom.size();
 
   if (VERBOSE)
+    cerr << "[error freq: " << error_freq << "]\n";
+  if (VERBOSE)
     cerr << "[calculating reference allele frequencies]\n";
 
 #pragma omp parallel for
   for (size_t i = 0; i < lim; ++i) {
-    if (stats[i].depth() > 0)
+    if (stats[i].depth() > 0) {
       psi[i] = stats[i].calc_psi(error_freq);
+    }
   }
 
   if (VERBOSE)
@@ -459,25 +486,26 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
   vector<pos_stats> stats;
   double similarity;
 
-  bool chrom_has_reads = false;
   unordered_set<string> chroms_seen;
   string cur_chrom, cur_chrom_name = "";
 
   SAMReader sam_reader(mapped_reads_file);
   sam_rec aln;
+  bool started = false;
   while (sam_reader >> aln) {
     if (aln.rname != cur_chrom_name) {
       // new chrom to process
       if (chroms_seen.find(aln.rname) != end(chroms_seen))
         throw runtime_error("chroms out of order in mapped reads file\n");
 
-      if (chrom_has_reads) {
+      if (started) {
         summarize_chrom_stats(VERBOSE, cur_chrom, cur_chrom_name, 
                               psi, stats, cnts, similarity);
 
         write_chrom_stats(cur_chrom_name, cur_chrom.size(), 
                           similarity, psi, cnts, out);
       }
+      started = true;
 
       if (VERBOSE)
         cerr << "[processing SAM reads in chromosome " << aln.rname << "]\n";
@@ -489,21 +517,20 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
       // reset statistics
       const size_t chrom_sz = cur_chrom.size();
       psi.resize(chrom_sz);
+
+#pragma omp parallel for
       for (size_t i = 0; i != chrom_sz; ++i)
         psi[i] = pos_stats::psi_not_calculated;
     }
 
-    chrom_has_reads = true;
     adjust_alignment<bisulfite_bases>(aln);
     process_alignment<bisulfite_bases>(aln, cur_chrom, stats, cnts);
   }
 
-  if (chrom_has_reads) {
-    summarize_chrom_stats(VERBOSE, cur_chrom, cur_chrom_name,
-                          psi, stats, cnts, similarity);
-    write_chrom_stats(cur_chrom_name, cur_chrom.size(), 
-                      similarity, psi, cnts, out);
-  }
+  summarize_chrom_stats(VERBOSE, cur_chrom, cur_chrom_name,
+                        psi, stats, cnts, similarity);
+  write_chrom_stats(cur_chrom_name, cur_chrom.size(),
+                    similarity, psi, cnts, out);
 }
 
 int
@@ -586,3 +613,4 @@ main(const int argc, const char **argv) {
 
   return EXIT_SUCCESS;
 }
+
