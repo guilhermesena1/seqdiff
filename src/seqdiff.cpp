@@ -129,6 +129,8 @@ pos_stats::calc_psi(const double err) const {
                         to_string(l2));
   }
 
+  // maximum of the quadratic function is some value
+  // between 0 and 1
   const double cand = (l0 - l1)/(l0 - 2*l1 + l2);
   if (!isnan(cand)) {
     if (cand >= 0 && cand <= 1) {
@@ -136,36 +138,8 @@ pos_stats::calc_psi(const double err) const {
     }
   }
 
-  const double eps = 1e-10;
-  size_t niter = 0;
-
-  double psi = 1;
-  double psi_prev = 0;
-
-  while (fabs(psi - psi_prev) > eps) {
-    psi_prev = psi;
-
-    const double num = 2*l1*psi*(1 - psi) + 2*l2*psi*psi;
-    const double denom = l0*(1 - psi)*(1 - psi) + 2*l1*psi*(1 - psi) + l2*psi*psi;
-
-    if (denom == 0.0) {
-      // GS: too much data. fall back to naive conversion?
-      // this is a hack. Need to implement log sum log exp
-      return bases_ref / static_cast<double>(depth());
-    }
-
-    psi = num/(num_alleles*denom);
-    if (++niter > 10000) {
-      cerr << "[WARNING: psi calculation did not converge. Value:  " << psi << "]\n";
-      return psi;
-    }
-  }
-  
-  // GS: not sure if needed, but it makes sense to truncate to zero when
-  // psi is very small because it went under epsilon
-  if (psi < eps) psi = 0;
-
-  return psi;
+  // maximum of the quadratic function is in a border
+  return (l0 > l2) ? 0.0 : 1.0;
 }
 
 string
@@ -364,11 +338,13 @@ process_alignment(const sam_rec &aln,
         throw runtime_error("alignment mapped outside chrom boundaries\n" +
                             aln.tostring());
 
-      stats[start + i].add_base(
-        the_aln_base, chrom[start + i], // ref base
-        !check_flag(aln, samflags::read_rc) // +/- strand
-      );
-      cnts.add_base(the_aln_base, chrom[start+i]);
+      if (chrom[start + i] != 'N') {
+        stats[start + i].add_base(
+          the_aln_base, chrom[start + i], // ref base
+          !check_flag(aln, samflags::read_rc) // +/- strand
+        );
+        cnts.add_base(the_aln_base, chrom[start+i]);
+      }
     }
   }
 }
@@ -392,13 +368,13 @@ calc_error_freq(const vector<pos_stats> &stats) {
 
 static void
 summarize_chrom_stats(const bool VERBOSE,
-                      const string &cur_chrom, const string &cur_chrom_name,
+                      const string &chrom,
                       vector<double> &psi,
                       const vector<pos_stats> &stats,
                       const total_counts &cnts,
                       double &similarity) {
   const double error_freq = calc_error_freq(stats);
-  const size_t lim = cur_chrom.size();
+  const size_t lim = chrom.size();
 
   if (VERBOSE)
     cerr << "[error freq: " << error_freq << "]\n";
@@ -499,8 +475,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
         throw runtime_error("chroms out of order in mapped reads file\n");
 
       if (started) {
-        summarize_chrom_stats(VERBOSE, cur_chrom, cur_chrom_name, 
-                              psi, stats, cnts, similarity);
+        summarize_chrom_stats(VERBOSE, cur_chrom, psi, stats, cnts, similarity);
 
         write_chrom_stats(cur_chrom_name, cur_chrom.size(), 
                           similarity, psi, cnts, out);
@@ -527,8 +502,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
     process_alignment<bisulfite_bases>(aln, cur_chrom, stats, cnts);
   }
 
-  summarize_chrom_stats(VERBOSE, cur_chrom, cur_chrom_name,
-                        psi, stats, cnts, similarity);
+  summarize_chrom_stats(VERBOSE, cur_chrom, psi, stats, cnts, similarity);
   write_chrom_stats(cur_chrom_name, cur_chrom.size(),
                     similarity, psi, cnts, out);
 }
