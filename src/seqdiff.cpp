@@ -552,7 +552,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
 
 
 // fills all regions outside of bed file with Ns
-void
+template<const bool complementary_region> void
 mask_chroms(const bool VERBOSE,
             const string &regions_file,
             vector<string> &all_chroms,
@@ -590,12 +590,15 @@ mask_chroms(const bool VERBOSE,
       chroms_seen.insert(cur_chrom_name);
 
       get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom);
-      masked_chrom = string(cur_chrom.size(), 'N');
+      if (complementary_region)
+        masked_chrom = cur_chrom;
+      else
+        masked_chrom = string(cur_chrom.size(), 'N');
     }
 
     const size_t reg_start = cur.start, reg_end = cur.end;
     for (size_t i = reg_start; i < reg_end; ++i)
-      masked_chrom[i] = cur_chrom[i];
+      masked_chrom[i] = (complementary_region) ? 'N' : cur_chrom[i];
   }
   all_chroms[chrom_lookup[cur_chrom_name]] = masked_chrom;
 
@@ -607,6 +610,7 @@ main(const int argc, const char **argv) {
   try {
     bool VERBOSE = false;
     bool bisulfite = false;
+    bool complementary_region = false;
     size_t num_threads = 1;
     string outfile = "";
     string regions_file = "";
@@ -621,6 +625,10 @@ main(const int argc, const char **argv) {
     opt_parse.add_opt("regions", 'r',
                       "regions BED file, mutations will only be counted "
                       "inside the BED regions", false, regions_file);
+    opt_parse.add_opt("complement-region", 'C',
+                     "count mutations outside of BED file (requires -r)", false,
+                     complementary_region);
+
     vector<string> leftover_args;
     opt_parse.parse(argc, argv, leftover_args);
     if (argc == 1 || opt_parse.help_requested()) {
@@ -661,9 +669,14 @@ main(const int argc, const char **argv) {
     unordered_map<string, size_t> chrom_lookup;
     load_chroms(VERBOSE, genome_file, all_chroms, chrom_names, chrom_lookup);
 
-    if (regions_file != "")
-      mask_chroms(VERBOSE, regions_file, all_chroms, chrom_names,
-                  chrom_lookup);
+    if (regions_file != "") {
+      if (complementary_region)
+        mask_chroms<true>(VERBOSE, regions_file, all_chroms, chrom_names,
+                          chrom_lookup);
+      else
+        mask_chroms<false>(VERBOSE, regions_file, all_chroms, chrom_names,
+                           chrom_lookup);
+    }
 
     std::ofstream of;
     if (!outfile.empty()) 
