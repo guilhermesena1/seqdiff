@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <cmath>
 #include <stdexcept>
+#include <sstream>
 
 #include "smithlab_utils.hpp"
 #include "smithlab_os.hpp"
@@ -34,6 +35,9 @@ using std::min;
 using std::max;
 using std::ostream;
 using std::ostringstream;
+using std::istream;
+using std::ifstream;
+using std::istringstream;
 
 typedef uint16_t count_t;
 
@@ -78,6 +82,48 @@ struct pos_stats {
   static size_t num_alleles;
   static double psi_not_calculated;
 };
+
+struct bed_entry {
+  string chr;
+  size_t start, end;
+  bed_entry() {
+    chr = "";
+    start = end = 0;
+  }
+
+  bed_entry(const string &line) {
+    istringstream iss(line);
+    iss >> chr;
+    iss >> start;
+    iss >> end;
+  }
+
+  bool pos_before_region(const size_t pos) const {
+    return pos < start;
+  }
+
+  bool pos_after_region(const size_t pos) const {
+    return pos >= end;
+  }
+
+  bool pos_in_region(const size_t pos) const {
+    return !pos_before_region(pos) && pos_after_region(pos);
+  }
+};
+
+template<class T>
+T& operator>>(T &the_stream, bed_entry &e) {
+  string s;
+  getline(the_stream, s);
+  e = bed_entry(s);
+  return the_stream;
+}
+
+template<class T>
+T& operator<<(T &the_stream, bed_entry &e) {
+  the_stream << e.chr << '\t' << e.start << '\t' << e.end;
+  return the_stream;
+}
 
 size_t pos_stats::num_bases = 5;
 size_t pos_stats::num_alleles = 2;
@@ -229,26 +275,16 @@ operator<<(ostream &the_stream, const total_counts &cnts) {
 static void
 get_chrom(const string &chrom_name, const vector<string> &all_chroms,
           const unordered_map<string, size_t> &chrom_lookup,
-          string &chrom, vector<pos_stats> &stats,
-          total_counts &cnts) {
+          string &chrom) {
   const auto the_chrom = chrom_lookup.find(chrom_name);
   if (the_chrom == end(chrom_lookup))
     throw runtime_error("could not find chrom " + chrom_name);
 
   chrom = all_chroms[the_chrom->second];
   transform(begin(chrom), end(chrom), begin(chrom), ::toupper);
-
-  const size_t chrom_sz = chrom.size();
-  stats.resize(chrom_sz);
-
-  cnts.reset();
-  for (size_t i = 0; i < chrom_sz; ++i) {
-    cnts.add_exp(chrom[i]);
-    stats[i].reset();
-  }
-
   if (chrom.empty())
     throw runtime_error("problem with chrom sequence " + chrom_name);
+
 }
 
 static void
@@ -351,7 +387,7 @@ process_alignment(const sam_rec &aln,
 
 static double
 calc_error_freq(const vector<pos_stats> &stats) {
-  static const double baseline_error_value = 0.01;
+  static const double baseline_error_value = 0.001;
   size_t err = 0;
   size_t tot = 0;
   const size_t lim = stats.size();
@@ -487,10 +523,17 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
 
       cur_chrom_name = aln.rname;
       chroms_seen.insert(cur_chrom_name);
-      get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom, stats, cnts);
+      get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom);
 
       // reset statistics
       const size_t chrom_sz = cur_chrom.size();
+      stats.resize(chrom_sz);
+
+      cnts.reset();
+      for (size_t i = 0; i < chrom_sz; ++i) {
+        cnts.add_exp(cur_chrom[i]);
+        stats[i].reset();
+      }
       psi.resize(chrom_sz);
 
 #pragma omp parallel for
@@ -507,13 +550,66 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
                     similarity, psi, cnts, out);
 }
 
+
+// fills all regions outside of bed file with Ns
+void
+mask_chroms(const bool VERBOSE,
+            const string &regions_file,
+            vector<string> &all_chroms,
+            const vector<string> &chrom_names,
+            unordered_map<string, size_t> &chrom_lookup) {
+  ifstream bed_in(regions_file);
+  bed_entry cur;
+
+  string cur_chrom, cur_chrom_name = "";
+  string masked_chrom;
+  unordered_set<string> chroms_seen;
+
+  bool started = false;
+  if (VERBOSE)
+    cerr << "[Masking genome using BED file " << regions_file << "]\n";
+
+  if (!bed_in.good())
+    throw runtime_error("Bad BED file: " + regions_file);
+  while (bed_in >> cur) {
+    if (cur.chr != cur_chrom_name) {
+      // new chrom to process
+      
+      // we first repalce the old chrom with the final masked one
+      if (started)
+        all_chroms[chrom_lookup[cur_chrom_name]] = masked_chrom;
+      started = true;
+
+      if (chroms_seen.find(cur.chr) != end(chroms_seen))
+        throw runtime_error("chroms out of order in BED file\n");
+
+      if (VERBOSE)
+        cerr << "[getting BED regions for chrom " << cur.chr << "]\n";
+
+      cur_chrom_name = cur.chr;
+      chroms_seen.insert(cur_chrom_name);
+
+      get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom);
+      masked_chrom = string(cur_chrom.size(), 'N');
+    }
+
+    const size_t reg_start = cur.start, reg_end = cur.end;
+    for (size_t i = reg_start; i < reg_end; ++i)
+      masked_chrom[i] = cur_chrom[i];
+  }
+  all_chroms[chrom_lookup[cur_chrom_name]] = masked_chrom;
+
+  bed_in.close();
+}
+
 int
 main(const int argc, const char **argv) {
   try {
     bool VERBOSE = false;
     bool bisulfite = false;
     size_t num_threads = 1;
-    string outfile;
+    string outfile = "";
+    string regions_file = "";
     OptionParser opt_parse(strip_path(argv[0]),
                            "estimate edit distance between reference and mapped reads",
                            "<reference.fa> <seq-file.sam>");
@@ -522,6 +618,9 @@ main(const int argc, const char **argv) {
     opt_parse.add_opt("verbose", 'v', "print more run info", false, VERBOSE);
     opt_parse.add_opt("bisulfite", 'b', "reads come from WGBS", false, bisulfite);
     opt_parse.add_opt("output", 'o', "output YAML file", false, outfile);
+    opt_parse.add_opt("regions", 'r',
+                      "regions BED file, mutations will only be counted "
+                      "inside the BED regions", false, regions_file);
     vector<string> leftover_args;
     opt_parse.parse(argc, argv, leftover_args);
     if (argc == 1 || opt_parse.help_requested()) {
@@ -561,6 +660,10 @@ main(const int argc, const char **argv) {
     vector<string> chrom_names;
     unordered_map<string, size_t> chrom_lookup;
     load_chroms(VERBOSE, genome_file, all_chroms, chrom_names, chrom_lookup);
+
+    if (regions_file != "")
+      mask_chroms(VERBOSE, regions_file, all_chroms, chrom_names,
+                  chrom_lookup);
 
     std::ofstream of;
     if (!outfile.empty()) 
