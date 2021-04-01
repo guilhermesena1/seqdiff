@@ -473,12 +473,14 @@ write_psi_histogram(vector<double> &psi, ostream &out) {
 static void
 write_chrom_stats(const string &chrom_name,
                   const size_t &chrom_size,
+                  const size_t non_n_bases,
                   const double &similarity,
                   vector<double> &psi,
                   const total_counts &cnts, ostream &out) {
   static const string sep = "  ";
   out << chrom_name << ":\n";
   out << sep << "size: " << chrom_size << "\n";
+  out << sep << "non_n_bases: " << non_n_bases << "\n";
   out << sep << "similarity: " << similarity << "\n";
   out << sep << "global_base_stats:\n";
   out << cnts << "\n";
@@ -503,6 +505,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
 
   SAMReader sam_reader(mapped_reads_file);
   sam_rec aln;
+  size_t non_n_bases = 0;
   bool started = false;
   while (sam_reader >> aln) {
     if (aln.rname != cur_chrom_name) {
@@ -513,7 +516,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
       if (started) {
         summarize_chrom_stats(VERBOSE, cur_chrom, psi, stats, cnts, similarity);
 
-        write_chrom_stats(cur_chrom_name, cur_chrom.size(), 
+        write_chrom_stats(cur_chrom_name, cur_chrom.size(), non_n_bases,
                           similarity, psi, cnts, out);
       }
       started = true;
@@ -524,6 +527,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
       cur_chrom_name = aln.rname;
       chroms_seen.insert(cur_chrom_name);
       get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom);
+      non_n_bases = 0;
 
       // reset statistics
       const size_t chrom_sz = cur_chrom.size();
@@ -531,6 +535,7 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
 
       cnts.reset();
       for (size_t i = 0; i < chrom_sz; ++i) {
+        non_n_bases += (cur_chrom[i] != 'N');
         cnts.add_exp(cur_chrom[i]);
         stats[i].reset();
       }
@@ -546,10 +551,18 @@ process_reads(const bool VERBOSE, const string &mapped_reads_file,
   }
 
   summarize_chrom_stats(VERBOSE, cur_chrom, psi, stats, cnts, similarity);
-  write_chrom_stats(cur_chrom_name, cur_chrom.size(),
+  write_chrom_stats(cur_chrom_name, cur_chrom.size(), non_n_bases,
                     similarity, psi, cnts, out);
 }
 
+size_t
+count_non_n(const string &s) {
+  size_t ans = 0;
+  for (auto it(begin(s)); it != end(s); ++it)
+    ans += (*it != 'N');
+
+  return ans;
+}
 
 // fills all regions outside of bed file with Ns
 template<const bool complementary_region> void
@@ -561,44 +574,59 @@ mask_chroms(const bool VERBOSE,
   ifstream bed_in(regions_file);
   bed_entry cur;
 
-  string cur_chrom, cur_chrom_name = "";
-  string masked_chrom;
+  string cur_chrom = "";
+  string cur_chrom_name = "";
+  string masked_chrom = "";
   unordered_set<string> chroms_seen;
 
-  bool started = false;
   if (VERBOSE)
     cerr << "[Masking genome using BED file " << regions_file << "]\n";
 
   if (!bed_in.good())
     throw runtime_error("Bad BED file: " + regions_file);
+
   while (bed_in >> cur) {
     if (cur.chr != cur_chrom_name) {
-      // new chrom to process
-      
-      // we first repalce the old chrom with the final masked one
-      if (started)
+      if (!cur_chrom_name.empty()) {
+        if (chrom_lookup.find(cur_chrom_name) == end(chrom_lookup))
+          throw runtime_error("chrom does not exist in reference: " + 
+                              cur_chrom_name);
         all_chroms[chrom_lookup[cur_chrom_name]] = masked_chrom;
-      started = true;
 
-      if (chroms_seen.find(cur.chr) != end(chroms_seen))
-        throw runtime_error("chroms out of order in BED file\n");
+        if (VERBOSE)
+          cerr << "[non-n before after: "
+               << count_non_n(cur_chrom) << " "
+               << count_non_n(masked_chrom) << "]\n";
+          cerr << "[chrom size: " << cur_chrom.size() << "]\n";
 
-      if (VERBOSE)
-        cerr << "[getting BED regions for chrom " << cur.chr << "]\n";
+      }
 
       cur_chrom_name = cur.chr;
+
+      if (chroms_seen.find(cur_chrom_name) != end(chroms_seen))
+        throw runtime_error("chroms out of order in BED file: " +
+                            cur_chrom_name);
       chroms_seen.insert(cur_chrom_name);
 
+      if (VERBOSE)
+        cerr << "[getting BED regions for chrom " << cur_chrom_name << "]\n";
+
       get_chrom(cur_chrom_name, all_chroms, chrom_lookup, cur_chrom);
-      if (complementary_region)
-        masked_chrom = cur_chrom;
-      else
-        masked_chrom = string(cur_chrom.size(), 'N');
+      masked_chrom.resize(cur_chrom.size());
+      for (size_t i = 0; i < masked_chrom.size(); ++i)
+        if (complementary_region) 
+          masked_chrom[i] = cur_chrom[i];
+        else
+          masked_chrom[i] = 'N';
     }
 
     const size_t reg_start = cur.start, reg_end = cur.end;
-    for (size_t i = reg_start; i < reg_end; ++i)
-      masked_chrom[i] = (complementary_region) ? 'N' : cur_chrom[i];
+    for (size_t i = reg_start; i < reg_end; ++i) {
+      if (complementary_region)
+        masked_chrom[i] = 'N';
+      else
+        masked_chrom[i] = cur_chrom[i];
+    }
   }
   all_chroms[chrom_lookup[cur_chrom_name]] = masked_chrom;
 
