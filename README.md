@@ -1,9 +1,7 @@
 # seqdiff
 
 This program implements Heng Li's formulas in
-[A statistical framework for SNP calling, mutation discovery, association mapping and population
-genetical parameter estimation from sequencing data]
-(https://academic.oup.com/bioinformatics/article/27/21/2987/217423?login=true).
+[A statistical framework for SNP calling, mutation discovery, association mapping and population genetical parameter estimation from sequencing data](https://academic.oup.com/bioinformatics/article/27/21/2987/217423?login=true).
 
 The goal of this program is to take as input a set of mapped reads and a reference diploid genome,
 and estimate the fraction of nucleotides that mutated, where each nucleotide can take a continuous number
